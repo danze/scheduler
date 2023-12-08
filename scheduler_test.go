@@ -9,20 +9,9 @@ import (
 	"time"
 )
 
-type myTask struct {
-	exec, timeout time.Duration
-}
-
-func (t *myTask) Exec() (any, error) {
-	time.Sleep(t.exec)
+var myTask = func() (any, error) {
+	time.Sleep(2 * time.Second)
 	return "Result is 42", nil
-}
-
-func (t *myTask) Timeout() time.Duration {
-	if t.timeout == 0 {
-		return time.Duration(1<<63 - 1)
-	}
-	return t.timeout.Abs()
 }
 
 var s *Scheduler
@@ -46,12 +35,15 @@ func afterTest(t *testing.T, taskID string) {
 
 func Test_Completed1(t *testing.T) {
 	// schedule 2 sec task
-	runTaskHelper(t, &myTask{exec: 2 * time.Second})
+	runTaskHelper(t, myTask)
 }
 
 func Test_Completed2(t *testing.T) {
 	// schedule short-lived task
-	runTaskHelper(t, &myTask{exec: time.Millisecond})
+	runTaskHelper(t, func() (any, error) {
+		time.Sleep(time.Millisecond)
+		return "Result is 42", nil
+	})
 }
 
 func runTaskHelper(t *testing.T, task Task) {
@@ -70,7 +62,7 @@ func runTaskHelper(t *testing.T, task Task) {
 
 func Test_Cancelled(t *testing.T) {
 	beforeTest()
-	id, err := s.Submit(&myTask{exec: 2 * time.Second})
+	id, err := s.Submit(myTask)
 	assert.Nil(t, err, "failed to submit task")
 
 	err = s.Cancel(id)
@@ -85,7 +77,7 @@ func Test_Cancelled(t *testing.T) {
 
 func Test_TimedOut(t *testing.T) {
 	beforeTest()
-	id, err := s.Submit(&myTask{exec: 2 * time.Second, timeout: time.Second})
+	id, err := s.SubmitWithTimeout(myTask, time.Second)
 	assert.Nil(t, err, "failed to submit task")
 
 	var wasRunning bool
@@ -107,8 +99,7 @@ func Test_TimedOut(t *testing.T) {
 
 func Test_Stopped(t *testing.T) {
 	beforeTest()
-	task := &myTask{exec: time.Second}
-	id, err := s.Submit(task)
+	id, err := s.Submit(myTask)
 	assert.Nil(t, err, "failed to submit task")
 
 	s.Stop()
@@ -118,8 +109,8 @@ func Test_Stopped(t *testing.T) {
 	err = s.Cancel(id)
 	assert.Nil(t, err, "cancelling completed task should have no effect")
 
-	_, err = s.Submit(task)
-	assert.NotNil(t, err, "expected an error")
+	_, err = s.Submit(myTask)
+	assert.NotNil(t, err, "stopped scheduler should not accept new tasks")
 
 	time.Sleep(2 * time.Second)
 	afterTest(t, id)
@@ -129,9 +120,11 @@ func Test_MultipleCompleted(t *testing.T) {
 	beforeTest()
 	max := 1000
 	taskID := make([]string, 0, max)
+	task1 := func() (any, error) {
+		return "Result is 42", nil
+	}
 	for i := 0; i < max; i++ {
-		task := &myTask{exec: 0}
-		id, err := s.Submit(task)
+		id, err := s.Submit(task1)
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}
@@ -147,8 +140,7 @@ func Test_MultipleCancelled(t *testing.T) {
 	max := 1000
 	taskID := make([]string, 0, max)
 	for i := 0; i < max; i++ {
-		task := &myTask{exec: 2 * time.Second}
-		id, err := s.Submit(task)
+		id, err := s.Submit(myTask)
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}
@@ -173,9 +165,12 @@ func Test_MultipleTimedOut(t *testing.T) {
 	beforeTest()
 	max := 1000
 	taskID := make([]string, 0, max)
+	task1 := func() (any, error) {
+		time.Sleep(time.Second)
+		return "Result is 42", nil
+	}
 	for i := 0; i < max; i++ {
-		task := &myTask{exec: time.Second, timeout: time.Millisecond}
-		id, err := s.Submit(task)
+		id, err := s.SubmitWithTimeout(task1, time.Millisecond)
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}
@@ -191,8 +186,7 @@ func Test_MultipleStopped(t *testing.T) {
 	max := 1000
 	taskID := make([]string, 0, max)
 	for i := 0; i < max; i++ {
-		task := &myTask{exec: 2 * time.Second}
-		id, err := s.Submit(task)
+		id, err := s.Submit(myTask)
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}

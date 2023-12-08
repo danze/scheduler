@@ -7,32 +7,19 @@ import (
 	"time"
 )
 
-type myTask struct {
-	exec, timeout time.Duration
-}
-
-func (t *myTask) Exec() (any, error) {
-	time.Sleep(t.exec)
-	return "Result is 42", nil
-}
-
-func (t *myTask) Timeout() time.Duration {
-	if t.timeout == 0 {
-		return time.Duration(1<<63 - 1)
-	}
-	return t.timeout.Abs()
-}
-
 func main() {
-	example1()
-	//example2()
-	//example3()
-	//example4()
+	exampleCompletedTask()
+	exampleCanceledTask()
+	exampleTimedOutTask()
+	exampleStoppedTask()
 }
 
-func example1() {
+func exampleCompletedTask() {
 	s := scheduler.New()
-	id, err := s.Submit(&myTask{exec: time.Second})
+	id, err := s.Submit(func() (any, error) {
+		time.Sleep(time.Second)
+		return "Result is 42", nil
+	})
 	if err != nil {
 		fmt.Printf("failed to submit task: %v", err)
 		os.Exit(1)
@@ -49,9 +36,12 @@ func example1() {
 	fmt.Println((*status).StringDetailed())
 }
 
-func example2() {
+func exampleCanceledTask() {
 	s := scheduler.New()
-	id, err := s.Submit(&myTask{exec: time.Second})
+	id, err := s.Submit(func() (any, error) {
+		time.Sleep(time.Second)
+		return "Result is 42", nil
+	})
 	if err != nil {
 		fmt.Printf("failed to submit task: %v", err)
 		os.Exit(1)
@@ -70,9 +60,14 @@ func example2() {
 	fmt.Println((*status).StringDetailed())
 }
 
-func example3() {
+func exampleTimedOutTask() {
 	s := scheduler.New()
-	id, err := s.Submit(&myTask{exec: 2 * time.Second, timeout: time.Second})
+	myTask := func() (any, error) {
+		time.Sleep(2 * time.Second)
+		return "Result is 42", nil
+	}
+	myTaskTimeout := time.Second
+	id, err := s.SubmitWithTimeout(myTask, myTaskTimeout)
 	if err != nil {
 		fmt.Printf("failed to submit task: %v", err)
 		os.Exit(1)
@@ -89,11 +84,14 @@ func example3() {
 	fmt.Println((*status).StringDetailed())
 }
 
-func example4() {
+func exampleStoppedTask() {
 	s := scheduler.New()
 	var taskIDs []string
 	for x := 0; x < 10; x++ {
-		id, err := s.Submit(&myTask{exec: 5 * time.Second})
+		id, err := s.Submit(func() (any, error) {
+			time.Sleep(5 * time.Second)
+			return "Result is 42", nil
+		})
 		if err != nil {
 			fmt.Printf("failed to submit task: %v", err)
 			os.Exit(1)
@@ -105,7 +103,7 @@ func example4() {
 	for _, id := range taskIDs {
 		status, err := s.Status(id)
 		if err != nil {
-			fmt.Printf("failed to submit task: %v", err)
+			fmt.Printf("failed to get task status: %v", err)
 			os.Exit(1)
 		}
 		if !status.Completed() {

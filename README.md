@@ -1,36 +1,21 @@
 # scheduler
 Package scheduler provides concurrent task scheduler with support for
-cancellation and timeout. A user task must satisfy the `Task` interface
-in order to be accepted by this scheduler.
+cancellation and timeout. `Task` defines a user submitted task
+executed by this scheduler.
 
 ```go
-// Task is a user submitted task that is executed by this scheduler
-type Task interface {
-	// Exec is called when the scheduler is ready to run this task
-	Exec() (any, error)
-
-	// Timeout returns the timeout for this task
-	Timeout() time.Duration
-}
+type Task func() (any, error)
 ```
 
 ### Examples
 
 ```go
-type myTask struct {
-}
-
-func (t *myTask) Exec() (any, error) {
-	return "Result is 42", nil
-}
-
-func (t *myTask) Timeout() time.Duration {
-	return time.Duration(1<<63 - 1)
-}
-
-func example1() {
+func exampleCompletedTask() {
 	s := scheduler.New()
-	id, err := s.Submit(&myTask{})
+	id, err := s.Submit(func () (any, error) {
+		time.Sleep(time.Second)
+		return "Result is 42", nil
+	})
 	if err != nil {
 		fmt.Printf("failed to submit task: %v", err)
 		os.Exit(1)
@@ -47,6 +32,8 @@ func example1() {
 	fmt.Println((*status).StringDetailed())
 }
 ```
+
+For more, see [examples](doc/examples/main.go).
 
 ### Implementation
 
@@ -97,8 +84,8 @@ Goroutines maintained by a `Scheduler`:
   Note that if a task finishes with one of `Canceled`, `TimedOut`, or
   `Stopped` status, the associated **Executor** goroutine is left running
   behind when the **Runner** exits. The **Executor** left behind exits
-  when the task's `Task.Exec()` method returns. Therefore, the user
-  should avoid blocking forever in `Task.Exec()` to prevent goroutine leak.
+  when the user task returns. Therefore, the user
+  should avoid blocking forever to prevent goroutine leak.
 
 - **Executor**: created by **Runner** to run a task. After the task is
   complete, **Executor** reports output back to **Runner**. And

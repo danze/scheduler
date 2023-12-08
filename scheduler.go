@@ -109,6 +109,13 @@ func (s *Scheduler) IsStopped() bool {
 // Submit schedules the given Task to run by this Scheduler. If the Task is
 // scheduled successfully, it returns task ID otherwise an error.
 func (s *Scheduler) Submit(task Task) (string, error) {
+	return s.SubmitWithTimeout(task, time.Duration(1<<63-1))
+}
+
+// SubmitWithTimeout schedules the given Task to run by this Scheduler. It sets
+// the task timeout to the given value. If the Task is
+// scheduled successfully, it returns task ID otherwise an error.
+func (s *Scheduler) SubmitWithTimeout(task Task, timeout time.Duration) (string, error) {
 	if s.IsStopped() {
 		return "", fmt.Errorf("scheduler has been stopped")
 	}
@@ -130,7 +137,7 @@ func (s *Scheduler) Submit(task Task) (string, error) {
 	s.mu.Unlock()
 	s.wg.Add(1)
 	// creates Runner goroutine for this task
-	go s.runner(id, task, cancel)
+	go s.runner(id, task, timeout, cancel)
 	return id, nil
 }
 
@@ -139,7 +146,7 @@ type taskResult struct {
 	err    error
 }
 
-func (s *Scheduler) runner(id string, t Task, cancel chan struct{}) {
+func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel chan struct{}) {
 	defer s.wg.Done()
 
 	s.result <- TaskStatus{
@@ -150,13 +157,13 @@ func (s *Scheduler) runner(id string, t Task, cancel chan struct{}) {
 	var taskChan = make(chan *taskResult, 1)
 	go func() {
 		// this Executor goroutine will never exit until after t.Exec() returns
-		output, err := t.Exec()
+		output, err := task()
 		taskChan <- &taskResult{output, err}
 		close(taskChan)
 		logger.Debug("Task exited [" + id + "]")
 	}()
 
-	timer := time.NewTimer(t.Timeout())
+	timer := time.NewTimer(timeout.Abs())
 	defer func() {
 		// allows the garbage collector to reclaim the timer
 		timer.Stop()

@@ -2,20 +2,10 @@ package scheduler
 
 import (
 	"fmt"
-	"time"
 )
 
-// Task defines a user submitted task that is executed by the Scheduler.
-type Task interface {
-	// Exec implements the details of this task. The Scheduler calls Exec,
-	// when it's ready to run this task.
-	Exec() (any, error)
-
-	// Timeout returns a duration during which this task should time out. If
-	// you don't want this task to time out, you may return the maximum for
-	// this type `time.Duration(1<<63 - 1)`.
-	Timeout() time.Duration
-}
+// Task defines a user submitted task that is executed by Scheduler.
+type Task func() (any, error)
 
 type Status int
 
