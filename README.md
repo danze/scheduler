@@ -122,10 +122,9 @@ the associated **Runner** updates the task status to `TimedOut` and exits.
 
 #### Stop a scheduler
 
-When a user stops the scheduler, the scheduler sends stop signal to all
-active goroutines (**Runners**, **Updater**, and **Closer**). All
-**Runners** send a `Stopped` status message and exit. When all **Runners** exit,
-**Closer** closes `result` channel to signal to **Updater** that it needs
-to exit once it read all messages from the channel.
+When the scheduler is stopped, all active goroutines receive a stop signal.
+All **Runners** send a `Stopped` status message and exit immediately. Then
+**Closer** closes `result` channel and this allows **Updater** to exit
+after reading all messages from the channel.
 
 ![](doc/diagram2.svg)
