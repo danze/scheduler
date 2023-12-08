@@ -155,12 +155,27 @@ func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel c
 	}
 
 	var taskChan = make(chan *taskResult, 1)
+	// creates Executor goroutine to run user task
 	go func() {
-		// this Executor goroutine will never exit until after t.Exec() returns
+		defer func() {
+			// check if user task panicked
+			if r := recover(); r != nil {
+				var err error
+				switch w := r.(type) {
+				case error:
+					err = w
+				default:
+					// panicked with non-error value
+					err = fmt.Errorf("%v", r)
+				}
+				logger.Debug(fmt.Sprintf("Task panicked [%s]: %v", id, err))
+				taskChan <- &taskResult{nil, err}
+			}
+			close(taskChan)
+			logger.Debug("Task exited [" + id + "]")
+		}()
 		output, err := task()
 		taskChan <- &taskResult{output, err}
-		close(taskChan)
-		logger.Debug("Task exited [" + id + "]")
 	}()
 
 	timer := time.NewTimer(timeout.Abs())

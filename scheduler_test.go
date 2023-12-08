@@ -46,6 +46,13 @@ func Test_Completed2(t *testing.T) {
 	})
 }
 
+func Test_Completed3(t *testing.T) {
+	// schedule a task that panics
+	runTaskHelper(t, func() (any, error) {
+		panic("invalid state")
+	})
+}
+
 func runTaskHelper(t *testing.T, task Task) {
 	beforeTest()
 	id, err := s.Submit(task)
@@ -125,6 +132,34 @@ func Test_MultipleCompleted(t *testing.T) {
 	}
 	for i := 0; i < max; i++ {
 		id, err := s.Submit(task1)
+		assert.Nil(t, err, "failed to submit task")
+		taskID = append(taskID, id)
+	}
+	time.Sleep(time.Second)
+	for _, id := range taskID {
+		checkStatus(t, s, id, TaskCompleted)
+	}
+	afterTest(t, "")
+}
+
+func Test_MultipleCompletedWithPanics(t *testing.T) {
+	beforeTest()
+	max := 20
+	taskID := make([]string, 0, max)
+	nonPanickingTask := func() (any, error) {
+		return "Result is 42", nil
+	}
+	panickingTask := func() (any, error) {
+		panic("invalid state")
+	}
+	for i := 0; i < max; i++ {
+		var id string
+		var err error
+		if i%2 == 0 {
+			id, err = s.Submit(nonPanickingTask)
+		} else {
+			id, err = s.Submit(panickingTask)
+		}
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}
