@@ -1,4 +1,7 @@
 # scheduler
+
+![Build and test](https://github.com/danze/scheduler/actions/workflows/go.yml/badge.svg?branch=main)
+
 Package scheduler provides concurrent task scheduler with support for
 cancellation and timeout. `Task` defines a user submitted task
 executed by this scheduler.
