@@ -3,11 +3,11 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sync"
 	"time"
 
-	"github.com/danze/scheduler/logger"
 	"github.com/google/uuid"
 )
 
@@ -60,10 +60,10 @@ func New() *Scheduler {
 		<-s.stopped
 		// After all tasks exit, this goroutine will close `result` channel and signals
 		// the "Updater" goroutine to start draining the channel and then exit.
-		logger.Debug("scheduler stopped: waiting for all task goroutines to exit ...")
+		slog.Debug("scheduler stopped: waiting for all task goroutines to exit ...")
 		s.wg.Wait()
 		close(s.result)
-		logger.Debug("scheduler stopped: all task goroutines exited and 'result' channel closed")
+		slog.Debug("scheduler stopped: all task goroutines exited and 'result' channel closed")
 	}()
 
 	// "Updater" goroutine receives status updates from tasks and
@@ -75,16 +75,16 @@ func New() *Scheduler {
 			case r := <-s.result:
 				err = updateFunc(r)
 				if err != nil {
-					logger.Warn("failed to update task status in map: " + err.Error())
+					slog.Warn("failed to update task status in map: " + err.Error())
 				}
 			case <-s.stopped:
 				for r := range s.result {
 					err = updateFunc(r)
 					if err != nil {
-						logger.Warn("failed to update task status in map: " + err.Error())
+						slog.Warn("failed to update task status in map: " + err.Error())
 					}
 				}
-				logger.Debug("scheduler stopped: 'Updater' goroutine completed reading updates and exited")
+				slog.Debug("scheduler stopped: 'Updater' goroutine completed reading updates and exited")
 				return
 			}
 		}
@@ -185,7 +185,7 @@ func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel c
 				taskChan <- &taskResult{nil, err}
 			}
 			close(taskChan)
-			logger.Debug(fmt.Sprintf("Task %v exited with result (output: %v, error: %v)", id, output, err))
+			slog.Debug(fmt.Sprintf("Task %v exited with result (output: %v, error: %v)", id, output, err))
 		}()
 		output, err = task(ctx)
 		taskChan <- &taskResult{output, err}

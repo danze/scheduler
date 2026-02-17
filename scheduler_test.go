@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"testing"
 	"time"
 
-	"github.com/danze/scheduler/logger"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -20,9 +20,8 @@ var s *Scheduler
 var buf bytes.Buffer
 
 func beforeTest() {
-	logger.SetLogLevel(logger.LevelDebug)
 	buf.Reset()
-	logger.SetOutput(&buf)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	s = New()
 }
 
