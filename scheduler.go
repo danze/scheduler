@@ -1,11 +1,13 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
-	"github.com/danze/scheduler/logger"
-	"github.com/google/uuid"
 	"sync"
 	"time"
+
+	"github.com/danze/scheduler/logger"
+	"github.com/google/uuid"
 )
 
 // Scheduler runs Task submitted by a user. It allows the user to get status
@@ -57,11 +59,10 @@ func New() *Scheduler {
 		<-s.stopped
 		// After all tasks exit, this goroutine will close `result` channel and signals
 		// the "Updater" goroutine to start draining the channel and then exit.
-		logger.Debug("scheduler stopped")
-		logger.Debug("waiting for all task goroutines to exit ...")
+		logger.Debug("scheduler stopped: waiting for all task goroutines to exit ...")
 		s.wg.Wait()
 		close(s.result)
-		logger.Debug("closed result channel")
+		logger.Debug("scheduler stopped: all task goroutines exited and 'result' channel closed")
 	}()
 
 	// "Updater" goroutine receives status updates from tasks and
@@ -82,7 +83,7 @@ func New() *Scheduler {
 						logger.Warn("failed to update task status in map: " + err.Error())
 					}
 				}
-				logger.Debug("exiting Updater goroutine")
+				logger.Debug("scheduler stopped: 'Updater' goroutine completed reading updates and exited")
 				return
 			}
 		}
@@ -93,7 +94,13 @@ func New() *Scheduler {
 
 // Stop stops this Scheduler and all tasks that are not completed.
 func (s *Scheduler) Stop() {
-	close(s.stopped)
+	select {
+	case <-s.stopped:
+		// Already stopped
+		return
+	default:
+		close(s.stopped)
+	}
 }
 
 // IsStopped checks if this Scheduler has been stopped.
@@ -154,13 +161,18 @@ func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel c
 		Status: TaskRunning,
 	}
 
+	// Create cancellable context for the task
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx() // Ensure context is always canceled when Runner goroutine exits
+
 	var taskChan = make(chan *taskResult, 1)
 	// creates Executor goroutine to run user task
 	go func() {
+		var output any
+		var err error
 		defer func() {
 			// check if user task panicked
 			if r := recover(); r != nil {
-				var err error
 				switch w := r.(type) {
 				case error:
 					err = w
@@ -168,23 +180,32 @@ func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel c
 					// panicked with non-error value
 					err = fmt.Errorf("%v", r)
 				}
-				logger.Debug(fmt.Sprintf("Task panicked [%s]: %v", id, err))
+				err = fmt.Errorf("panicked: %w", err)
 				taskChan <- &taskResult{nil, err}
 			}
 			close(taskChan)
-			logger.Debug("Task exited [" + id + "]")
+			logger.Debug(fmt.Sprintf("Task %v exited with result (output: %v, error: %v)", id, output, err))
 		}()
-		output, err := task()
+		output, err = task(ctx)
 		taskChan <- &taskResult{output, err}
 	}()
 
-	timer := time.NewTimer(timeout.Abs())
-	defer func() {
-		// allows the garbage collector to reclaim the timer
-		timer.Stop()
-	}()
+	timedOut := time.After(timeout.Abs())
 
-	for {
+	// Prioritize task completion over cancellation/timeout/stop signals
+	// to avoid marking a completed task with the wrong status
+	select {
+	case r := <-taskChan:
+		// Task completed - this takes priority
+		s.result <- TaskStatus{
+			ID:     id,
+			Status: TaskCompleted,
+			Output: r.output,
+			Err:    r.err,
+		}
+		return
+	default:
+		// Task not yet completed, check for cancel/stop/timeout
 		select {
 		case <-cancel:
 			s.result <- TaskStatus{
@@ -198,7 +219,7 @@ func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel c
 				Status: TaskStopped,
 			}
 			return
-		case <-timer.C:
+		case <-timedOut:
 			s.result <- TaskStatus{
 				ID:     id,
 				Status: TaskTimedOut,
@@ -224,6 +245,7 @@ func (s *Scheduler) Status(id string) (*TaskStatus, error) {
 	if !ok {
 		return nil, fmt.Errorf("not found: %s", id)
 	}
+	// TODO: TaskStatus is a pointer type and could be updated by multiple goroutines
 	return status.TaskStatus, nil
 }
 
@@ -236,6 +258,29 @@ func (s *Scheduler) Cancel(id string) error {
 	if !ok {
 		return fmt.Errorf("not found: %s", id)
 	}
-	close(status.cancel)
+	select {
+	case <-status.cancel:
+		// Already closed
+		return nil
+	default:
+		close(status.cancel)
+	}
+	return nil
+}
+
+// Remove removes a completed task from the scheduler's task map.
+// This should be called to prevent memory leaks when tasks are no longer needed.
+// Returns an error if the task is not found or is still running.
+func (s *Scheduler) Remove(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status, ok := s.tasks[id]
+	if !ok {
+		return fmt.Errorf("not found: %s", id)
+	}
+	if !status.TaskStatus.Completed() {
+		return fmt.Errorf("cannot remove task that is still running: %s", id)
+	}
+	delete(s.tasks, id)
 	return nil
 }

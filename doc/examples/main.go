@@ -1,24 +1,54 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"github.com/danze/scheduler"
 	"os"
 	"time"
+
+	"github.com/danze/scheduler"
 )
 
 func main() {
 	exampleCompletedTask()
+	exampleCompletedWithPanicTask()
 	exampleCanceledTask()
 	exampleTimedOutTask()
 	exampleStoppedTask()
 }
 
+var myTask = func(ctx context.Context) (any, error) {
+	select {
+	case <-time.After(time.Second):
+		return "Result is 42", nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func exampleCompletedTask() {
 	s := scheduler.New()
-	id, err := s.Submit(func() (any, error) {
-		time.Sleep(time.Second)
-		return "Result is 42", nil
+	id, err := s.Submit(myTask)
+	if err != nil {
+		fmt.Printf("failed to submit task: %v", err)
+		os.Exit(1)
+	}
+	status, err := s.Status(id)
+	for err == nil && !status.Completed() {
+		time.Sleep(100 * time.Millisecond)
+		status, err = s.Status(id)
+	}
+	if err != nil {
+		fmt.Printf("failed to get task status: %v", err)
+		os.Exit(1)
+	}
+	fmt.Println(status)
+}
+
+func exampleCompletedWithPanicTask() {
+	s := scheduler.New()
+	id, err := s.Submit(func(ctx context.Context) (any, error) {
+		panic("invalid state")
 	})
 	if err != nil {
 		fmt.Printf("failed to submit task: %v", err)
@@ -33,15 +63,12 @@ func exampleCompletedTask() {
 		fmt.Printf("failed to get task status: %v", err)
 		os.Exit(1)
 	}
-	fmt.Println((*status).StringDetailed())
+	fmt.Println(status)
 }
 
 func exampleCanceledTask() {
 	s := scheduler.New()
-	id, err := s.Submit(func() (any, error) {
-		time.Sleep(time.Second)
-		return "Result is 42", nil
-	})
+	id, err := s.Submit(myTask)
 	if err != nil {
 		fmt.Printf("failed to submit task: %v", err)
 		os.Exit(1)
@@ -57,17 +84,13 @@ func exampleCanceledTask() {
 		fmt.Printf("failed to get task status: %v", err)
 		os.Exit(1)
 	}
-	fmt.Println((*status).StringDetailed())
+	fmt.Println(status)
 }
 
 func exampleTimedOutTask() {
 	s := scheduler.New()
-	myTask := func() (any, error) {
-		time.Sleep(2 * time.Second)
-		return "Result is 42", nil
-	}
-	myTaskTimeout := time.Second
-	id, err := s.SubmitWithTimeout(myTask, myTaskTimeout)
+	timeout := time.Millisecond
+	id, err := s.SubmitWithTimeout(myTask, timeout)
 	if err != nil {
 		fmt.Printf("failed to submit task: %v", err)
 		os.Exit(1)
@@ -81,17 +104,14 @@ func exampleTimedOutTask() {
 		fmt.Printf("failed to get task status: %v", err)
 		os.Exit(1)
 	}
-	fmt.Println((*status).StringDetailed())
+	fmt.Println(status)
 }
 
 func exampleStoppedTask() {
 	s := scheduler.New()
 	var taskIDs []string
-	for x := 0; x < 10; x++ {
-		id, err := s.Submit(func() (any, error) {
-			time.Sleep(5 * time.Second)
-			return "Result is 42", nil
-		})
+	for x := 0; x < 3; x++ {
+		id, err := s.Submit(myTask)
 		if err != nil {
 			fmt.Printf("failed to submit task: %v", err)
 			os.Exit(1)
@@ -110,6 +130,6 @@ func exampleStoppedTask() {
 			fmt.Printf("scheduler failed to stop task: %v", id)
 			os.Exit(1)
 		}
-		fmt.Println((*status).StringDetailed())
+		fmt.Println(status)
 	}
 }

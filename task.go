@@ -1,11 +1,14 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
 )
 
 // Task defines a user submitted task that is executed by Scheduler.
-type Task func() (any, error)
+// The task receives a context.Context which should be checked for cancellation.
+// Users should monitor ctx.Done() and return early if the context is canceled.
+type Task func(context.Context) (any, error)
 
 type Status int
 
@@ -54,7 +57,8 @@ func (t *TaskStatus) Completed() bool {
 }
 
 func (t *TaskStatus) String() string {
-	return fmt.Sprintf("TaskStatus [%s, %v, %v, %v]", t.ID, t.Status, t.Output, t.Err)
+	return fmt.Sprintf("TaskStatus id: %s, status: %v, output: %v, error: %v",
+		t.ID, t.Status, t.Output, t.Err)
 }
 
 func (t *TaskStatus) StringDetailed() string {

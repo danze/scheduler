@@ -7,27 +7,38 @@ cancellation and timeout. `Task` defines a user submitted task
 executed by this scheduler.
 
 ```go
-type Task func() (any, error)
+type Task func(context.Context) (any, error)
 ```
+
+Tasks receive a `context.Context` which is canceled when the task is
+canceled, times out, or the scheduler is stopped. Tasks should monitor
+`ctx.Done()` and return early to prevent goroutine leaks.
 
 ### Examples
 
 ```go
-func exampleCompletedTask() {
+func exampleCanceledTask() {
 	s := scheduler.New()
-	id, err := s.Submit(func () (any, error) {
-		time.Sleep(time.Second)
-		return "Result is 42", nil
+	id, err := s.Submit(func(ctx context.Context) (any, error) {
+		// Example of a cancellation-aware task
+		select {
+		case <-time.After(time.Second):
+			return "Result is 42", nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	})
 	if err != nil {
 		fmt.Printf("failed to submit task: %v", err)
 		os.Exit(1)
 	}
-	status, err := s.Status(id)
-	for err == nil && !status.Completed() {
-		time.Sleep(100 * time.Millisecond)
-		status, err = s.Status(id)
+	err = s.Cancel(id)
+	if err != nil {
+		fmt.Printf("failed to cancel task: %v", err)
+		os.Exit(1)
 	}
+	time.Sleep(time.Second)
+	status, err := s.Status(id)
 	if err != nil {
 		fmt.Printf("failed to get task status: %v", err)
 		os.Exit(1)
@@ -85,10 +96,11 @@ Goroutines maintained by a `Scheduler`:
   `Canceled`, `TimedOut`, or `Stopped` (see above diagram).
 
   Note that if a task finishes with one of `Canceled`, `TimedOut`, or
-  `Stopped` status, the associated **Executor** goroutine is left running
-  behind when the **Runner** exits. The **Executor** left behind exits
-  when the user task returns. Therefore, the user
-  should avoid blocking forever to prevent goroutine leak.
+  `Stopped` status, the **Runner** exits immediately but the associated
+  **Executor** goroutine continues running until the user task returns.
+  The task's context is canceled, so tasks that monitor `ctx.Done()` will
+  exit promptly. Tasks that ignore the context and block forever will cause
+  goroutine leaks.
 
 - **Executor**: created by **Runner** to run a task. After the task is
   complete, **Executor** reports output back to **Runner**. And

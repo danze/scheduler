@@ -2,17 +2,19 @@ package scheduler
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"github.com/danze/scheduler/logger"
-	"github.com/stretchr/testify/assert"
+	"math/rand"
 	"testing"
 	"time"
+
+	"github.com/danze/scheduler/logger"
+	"github.com/stretchr/testify/assert"
 )
 
-var myTask = func() (any, error) {
-	time.Sleep(2 * time.Second)
-	return "Result is 42", nil
-}
+var myTaskOneMilliSec = newMockTask(time.Millisecond, false)
+var myTaskOneSec = newMockTask(time.Second, false)
+var myTaskPanics = newMockTask(time.Millisecond, true)
 
 var s *Scheduler
 var buf bytes.Buffer
@@ -28,29 +30,18 @@ func afterTest(t *testing.T, taskID string) {
 	logs := buf.String()
 	fmt.Println(logs)
 	if taskID != "" {
-		expectedString := fmt.Sprintf("Task exited [%s]", taskID)
+		expectedString := fmt.Sprintf("Task %v exited with result", taskID)
 		assert.Contains(t, logs, expectedString, "Task goroutine did not exit")
 	}
 }
 
-func Test_Completed1(t *testing.T) {
-	// schedule 2 sec task
-	runTaskHelper(t, myTask)
-}
-
-func Test_Completed2(t *testing.T) {
-	// schedule short-lived task
-	runTaskHelper(t, func() (any, error) {
-		time.Sleep(time.Millisecond)
-		return "Result is 42", nil
-	})
-}
-
-func Test_Completed3(t *testing.T) {
-	// schedule a task that panics
-	runTaskHelper(t, func() (any, error) {
-		panic("invalid state")
-	})
+func Test_Completed(t *testing.T) {
+	// 1 sec task
+	runTaskHelper(t, myTaskOneSec)
+	// 1 milli sec task
+	runTaskHelper(t, myTaskOneMilliSec)
+	// task that panics
+	runTaskHelper(t, myTaskPanics)
 }
 
 func runTaskHelper(t *testing.T, task Task) {
@@ -69,7 +60,7 @@ func runTaskHelper(t *testing.T, task Task) {
 
 func Test_Cancelled(t *testing.T) {
 	beforeTest()
-	id, err := s.Submit(myTask)
+	id, err := s.Submit(myTaskOneSec)
 	assert.Nil(t, err, "failed to submit task")
 
 	err = s.Cancel(id)
@@ -78,35 +69,35 @@ func Test_Cancelled(t *testing.T) {
 	time.Sleep(time.Second)
 	checkStatus(t, s, id, TaskCancelled)
 
-	time.Sleep(2 * time.Second)
+	// cancelling twice has no effect
+	err = s.Cancel(id)
+	assert.Nil(t, err, "failed to cancel task second time")
 	afterTest(t, id)
 }
 
 func Test_TimedOut(t *testing.T) {
 	beforeTest()
-	id, err := s.SubmitWithTimeout(myTask, time.Second)
+	id, err := s.SubmitWithTimeout(myTaskOneSec, 200*time.Millisecond)
 	assert.Nil(t, err, "failed to submit task")
 
-	var wasRunning bool
+	var startedRunning bool
 	status, err := s.Status(id)
 	for err == nil && !status.Completed() {
 		if status.Status == TaskRunning {
-			wasRunning = true
+			startedRunning = true
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		status, err = s.Status(id)
 	}
 	assert.Nil(t, err, "failed to get task status")
-	assert.True(t, wasRunning)
+	assert.True(t, startedRunning)
 	checkStatus(t, s, id, TaskTimedOut)
-
-	time.Sleep(2 * time.Second)
 	afterTest(t, id)
 }
 
 func Test_Stopped(t *testing.T) {
 	beforeTest()
-	id, err := s.Submit(myTask)
+	id, err := s.Submit(myTaskOneSec)
 	assert.Nil(t, err, "failed to submit task")
 
 	s.Stop()
@@ -116,66 +107,46 @@ func Test_Stopped(t *testing.T) {
 	err = s.Cancel(id)
 	assert.Nil(t, err, "cancelling completed task should have no effect")
 
-	_, err = s.Submit(myTask)
+	_, err = s.Submit(myTaskOneSec)
 	assert.NotNil(t, err, "stopped scheduler should not accept new tasks")
-
-	time.Sleep(2 * time.Second)
 	afterTest(t, id)
 }
 
 func Test_MultipleCompleted(t *testing.T) {
 	beforeTest()
-	max := 1000
-	taskID := make([]string, 0, max)
-	task1 := func() (any, error) {
-		return "Result is 42", nil
-	}
-	for i := 0; i < max; i++ {
-		id, err := s.Submit(task1)
-		assert.Nil(t, err, "failed to submit task")
-		taskID = append(taskID, id)
-	}
-	time.Sleep(time.Second)
-	for _, id := range taskID {
-		checkStatus(t, s, id, TaskCompleted)
-	}
-	afterTest(t, "")
-}
-
-func Test_MultipleCompletedWithPanics(t *testing.T) {
-	beforeTest()
-	max := 20
-	taskID := make([]string, 0, max)
-	nonPanickingTask := func() (any, error) {
-		return "Result is 42", nil
-	}
-	panickingTask := func() (any, error) {
-		panic("invalid state")
-	}
-	for i := 0; i < max; i++ {
-		var id string
-		var err error
+	size := 1000
+	taskID := make([]string, 0, size)
+	var id string
+	var err error
+	for i := 0; i < size; i++ {
+		delay := time.Duration(1+rand.Intn(1000)) * time.Millisecond
 		if i%2 == 0 {
-			id, err = s.Submit(nonPanickingTask)
+			id, err = s.Submit(newMockTask(delay, false))
 		} else {
-			id, err = s.Submit(panickingTask)
+			id, err = s.Submit(newMockTask(delay, true))
 		}
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}
-	time.Sleep(time.Second)
+	time.Sleep(2 * time.Second)
 	for _, id := range taskID {
 		checkStatus(t, s, id, TaskCompleted)
+		err = s.Remove(id)
+		assert.Nil(t, err, "failed to remove task")
+	}
+	for _, id := range taskID {
+		_, err = s.Status(id)
+		assert.NotNil(t, err, "task %v not removed", id)
 	}
 	afterTest(t, "")
 }
 
 func Test_MultipleCancelled(t *testing.T) {
 	beforeTest()
-	max := 1000
-	taskID := make([]string, 0, max)
-	for i := 0; i < max; i++ {
-		id, err := s.Submit(myTask)
+	size := 1000
+	taskID := make([]string, 0, size)
+	for i := 0; i < size; i++ {
+		id, err := s.Submit(myTaskOneSec)
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}
@@ -183,13 +154,8 @@ func Test_MultipleCancelled(t *testing.T) {
 		err := s.Cancel(id)
 		assert.Nil(t, err, "failed to cancel task")
 	}
-	// Wait for Updater goroutine to finish processing all updates. Why?
-	//		When all tasks get cancelled at the same time, there is spike
-	//		in number of updates from Runner goroutines to updateFunc. This causes
-	//		bottleneck in updateFunc as the function needs to acquire lock
-	//		before accessing `tasks` map. This bottleneck issue should be
-	//		alleviated when I switch to `sync.Map`.
-	time.Sleep(2 * time.Second)
+	// Wait for Updater goroutine to finish processing all updates.
+	time.Sleep(time.Second)
 	for _, id := range taskID {
 		checkStatus(t, s, id, TaskCancelled)
 	}
@@ -198,14 +164,10 @@ func Test_MultipleCancelled(t *testing.T) {
 
 func Test_MultipleTimedOut(t *testing.T) {
 	beforeTest()
-	max := 1000
-	taskID := make([]string, 0, max)
-	task1 := func() (any, error) {
-		time.Sleep(time.Second)
-		return "Result is 42", nil
-	}
-	for i := 0; i < max; i++ {
-		id, err := s.SubmitWithTimeout(task1, time.Millisecond)
+	size := 1000
+	taskID := make([]string, 0, size)
+	for i := 0; i < size; i++ {
+		id, err := s.SubmitWithTimeout(myTaskOneSec, time.Millisecond)
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}
@@ -218,16 +180,16 @@ func Test_MultipleTimedOut(t *testing.T) {
 
 func Test_MultipleStopped(t *testing.T) {
 	beforeTest()
-	max := 1000
-	taskID := make([]string, 0, max)
-	for i := 0; i < max; i++ {
-		id, err := s.Submit(myTask)
+	size := 1000
+	taskID := make([]string, 0, size)
+	for i := 0; i < size; i++ {
+		id, err := s.Submit(myTaskOneSec)
 		assert.Nil(t, err, "failed to submit task")
 		taskID = append(taskID, id)
 	}
 	s.Stop()
 	// Wait for Updater goroutine to finish processing all updates.
-	time.Sleep(2 * time.Second)
+	time.Sleep(time.Second)
 	for _, id := range taskID {
 		checkStatus(t, s, id, TaskStopped)
 	}
@@ -238,5 +200,18 @@ func checkStatus(t *testing.T, s *Scheduler, id string, expected Status) {
 	status, err := s.Status(id)
 	assert.Nil(t, err, "failed to get task status")
 	assert.Equal(t, expected, status.Status)
-	logger.Debug("status: " + (*status).String())
+}
+
+func newMockTask(delay time.Duration, returnWithPanic bool) Task {
+	return func(ctx context.Context) (any, error) {
+		select {
+		case <-time.After(delay):
+			if returnWithPanic {
+				panic("invalid state")
+			}
+			return "Result is 42", nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
