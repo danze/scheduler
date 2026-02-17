@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -245,8 +246,9 @@ func (s *Scheduler) Status(id string) (*TaskStatus, error) {
 	if !ok {
 		return nil, fmt.Errorf("not found: %s", id)
 	}
-	// TODO: TaskStatus is a pointer type and could be updated by multiple goroutines
-	return status.TaskStatus, nil
+	ts := *status.TaskStatus
+	ts.Output = deepCopyAny(ts.Output)
+	return &ts, nil
 }
 
 // Cancel cancels a task with the given ID. If the task has already completed,
@@ -283,4 +285,62 @@ func (s *Scheduler) Remove(id string) error {
 	}
 	delete(s.tasks, id)
 	return nil
+}
+
+func deepCopyAny(v any) any {
+	if v == nil {
+		return nil
+	}
+	return deepCopyValue(reflect.ValueOf(v)).Interface()
+}
+
+func deepCopyValue(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Ptr:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		dst := reflect.New(v.Type().Elem())
+		dst.Elem().Set(deepCopyValue(v.Elem()))
+		return dst
+	case reflect.Map:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		dst := reflect.MakeMap(v.Type())
+		for _, k := range v.MapKeys() {
+			dst.SetMapIndex(deepCopyValue(k), deepCopyValue(v.MapIndex(k)))
+		}
+		return dst
+	case reflect.Slice:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		dst := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := range v.Len() {
+			dst.Index(i).Set(deepCopyValue(v.Index(i)))
+		}
+		return dst
+	case reflect.Struct:
+		dst := reflect.New(v.Type()).Elem()
+		for i := range v.NumField() {
+			if dst.Field(i).CanSet() {
+				dst.Field(i).Set(deepCopyValue(v.Field(i)))
+			}
+		}
+		return dst
+	case reflect.Interface:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		dst := reflect.New(v.Type()).Elem()
+		dst.Set(deepCopyValue(v.Elem()))
+		return dst
+	default:
+		// Primitive types (bool, int, float, string, etc.) are immutable values.
+		// Chan and func are not deep-copyable; return as-is.
+		dst := reflect.New(v.Type()).Elem()
+		dst.Set(v)
+		return dst
+	}
 }
