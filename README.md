@@ -2,17 +2,13 @@
 
 ![Build and test](https://github.com/danze/scheduler/actions/workflows/go.yml/badge.svg?branch=main)
 
-Package scheduler provides concurrent task scheduler with support for
-cancellation and timeout. `Task` defines a user submitted task
-executed by this scheduler.
+Package `scheduler` provides a concurrent task scheduler with support for cancellation and timeouts. A `Task` is defined as a user-submitted function executed by the scheduler.
 
 ```go
 type Task func(context.Context) (any, error)
 ```
 
-Tasks receive a `context.Context` which is canceled when the task is
-canceled, times out, or the scheduler is stopped. Tasks should monitor
-`ctx.Done()` and return early to prevent goroutine leaks.
+Tasks receive a `context.Context` that is canceled when the task is explicitly canceled, expires due to a timeout, or when the scheduler is stopped. Tasks should monitor `ctx.Done()` and return early to prevent goroutine leaks.
 
 ### Examples
 
@@ -29,117 +25,85 @@ func exampleCanceledTask() {
 		}
 	})
 	if err != nil {
-		fmt.Printf("failed to submit task: %v", err)
+		fmt.Printf("failed to submit task: %v\n", err)
 		os.Exit(1)
 	}
 	err = s.Cancel(id)
 	if err != nil {
-		fmt.Printf("failed to cancel task: %v", err)
+		fmt.Printf("failed to cancel task: %v\n", err)
 		os.Exit(1)
 	}
-	time.Sleep(time.Second)
+	// Give some time for the cancellation to be processed
+	time.Sleep(100 * time.Millisecond)
 	status, err := s.Status(id)
 	if err != nil {
-		fmt.Printf("failed to get task status: %v", err)
+		fmt.Printf("failed to get task status: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println((*status).StringDetailed())
+	s.Stop()
 }
 ```
 
-For more, see [examples](doc/examples/main.go).
+For more details, see the [examples](doc/examples/main.go).
 
 ### Implementation
 
-Conceptual diagram showing how a `Scheduler` works internally.
+The following conceptual diagram illustrates the internal architecture of the `Scheduler`.
 
 ![](doc/diagram1.svg)
 
-A `Scheduler` provides APIs to submit task for execution, get task
-status, cancel task, and stop the scheduler itself. If the scheduler
-is stopped by the user, all non-complete tasks are stopped as well.
+The `Scheduler` provides APIs to submit tasks for execution, retrieve task status, cancel tasks, and stop the scheduler itself. When the scheduler is stopped, all non-completed tasks are aborted.
 
-Internal variables maintained by a `Scheduler`:
+#### Key Features
+- **Thread Safety**: All methods are safe for concurrent use.
+- **Deep Copying**: `Status()` returns a deep copy of task results, preventing data races when accessing results.
+- **Robust Shutdown**: `Stop()` blocks until all internal status updates are processed and system goroutines have exited.
+- **Circular Reference Support**: The internal deep-copy logic correctly handles complex data structures with circular references.
 
-- **result**: a Go channel used to send task status messages from
-  **Runners** to the scheduler.
-- **stopped**: a Go channel used to send stop signal from the scheduler
-  to all active Runners and the Closer goroutine. This happens when
-  the user stops the scheduler.
-- **tasks**: a Go map type used to store task ID and latest status.
-- **wg**: a `sync.WaitGroup` used to wait for all active **Runners**
-  to exit when this scheduler is stopping.
-- **mu**: a `sync.Mutex` used to control shared access to `tasks` map.
+#### Internal State
+A `Scheduler` maintains the following internal variables:
 
-Goroutines maintained by a `Scheduler`:
+- **result**: A Go channel used to transmit task status messages from **Runners** to the scheduler.
+- **stopped**: A Go channel used to broadcast a stop signal to all active Runners and the Closer goroutine.
+- **tasks**: A map used to store task IDs and their corresponding status records.
+- **wg**: A `sync.WaitGroup` used to track active **Runners** and ensure they exit during shutdown.
+- **sysWg**: A `sync.WaitGroup` used to coordinate the shutdown of system goroutines (**Closer** and **Updater**).
+- **mu**: A `sync.Mutex` used to synchronize access to the `tasks` map and the internal state.
 
-- **Runner**: created by the scheduler for each new task. Its job is
-  to run the given task, listen for cancel, timeout, and stop signals,
-  and when the task is complete, to report back output to
-  the scheduler. **Runner** runs the task in a separate **Executor**
-  goroutine. While the task is running, **Runner** waits for a message
-  from one of these channels:
-    - **taskChan**: Task specific channel used by an **Executor** to send
-      task output to a **Runner**.
-    - **cancel**: Task specific cancel channel used by the scheduler to
-      notify a **Runner** to cancel a task.
-    - **stopped**: global channel used by the scheduler to notify all
-      active goroutines that the scheduler is shutting down, and thus
-      they need to exit.
-    - **timer.C**: Task specific timer that fires when the task's
-      timeout elapse.
+#### Goroutines
+The `Scheduler` manages several types of goroutines:
 
-  **Runner** sends two status messages to **Updater** goroutine.
-  Task `Running` message is sent immediately after the **Runner**
-  starts up. Then a second and final message is sent when the
-  task completes, and this could be one of `Completed`,
-  `Canceled`, `TimedOut`, or `Stopped` (see above diagram).
+- **Runner**: Created for each new task. It executes the task, monitors for cancellation, timeout, or stop signals, and reports results back to the scheduler upon completion.
+  - The Runner executes the task within a separate **Executor** goroutine.
+  - While active, the Runner listens for messages from the following channels:
+    - **taskChan**: A task-specific channel used by an Executor to send output back to the Runner.
+    - **cancel**: A task-specific channel used to notify the Runner to abort the task.
+    - **stopped**: A global channel used to notify all active goroutines that the scheduler is shutting down.
+    - **timer.C**: A task-specific timer that fires when the task's timeout expires.
 
-  Note that if a task finishes with one of `Canceled`, `TimedOut`, or
-  `Stopped` status, the **Runner** exits immediately but the associated
-  **Executor** goroutine continues running until the user task returns.
-  The task's context is canceled, so tasks that monitor `ctx.Done()` will
-  exit promptly. Tasks that ignore the context and block forever will cause
-  goroutine leaks.
+  The Runner sends two status updates to the **Updater**: a `Running` status immediately after starting, and a final status (`Completed`, `Cancelled`, `TimedOut`, or `Stopped`) upon termination.
 
-- **Executor**: created by **Runner** to run a task. After the task is
-  complete, **Executor** reports output back to **Runner**. And
-  **Runner** reports output back to **Updater**.
-- **Updater**: created when a scheduler is initialized, and it remains
-  active until the scheduler is stopped. **Updater** reads task status
-  messages from `result` channel that are sent by active **Runners**.
-  Then it updates the `tasks` map in the scheduler. If the scheduler
-  is stopped, **Updater** reads all remaining messages in `result`
-  before exiting.
-- **Closer**: created when a scheduler is initialized, and it remains
-  active until the scheduler is stopped. If the scheduler is stopped,
-  all active **Runners** will exit immediately. The job of **Closer** is
-  to wait for all **Runners** to exit and then to signal **Updater** to
-  exit as well by closing the `result` channel.
+  **Note**: If a task terminates with a status other than `Completed`, the Runner exits immediately. However, the associated **Executor** will continue running until the user task returns. Since the task's context is canceled, tasks that monitor `ctx.Done()` will exit promptly. Tasks that ignore the context may cause goroutine leaks.
 
-#### Schedule a task
+- **Executor**: Created by the Runner to execute the user-submitted task. It reports its output back to the Runner upon completion.
+- **Updater**: Initialized alongside the scheduler, this goroutine remains active until the scheduler is stopped. It consumes task status messages from the `result` channel and updates the internal `tasks` map. During shutdown, it drains all remaining messages from the channel before terminating.
+- **Closer**: Initialized alongside the scheduler, this goroutine manages the shutdown sequence. When the scheduler is stopped, it waits for all Runners to finish and then closes the `result` channel to signal the Updater to exit.
 
-When a task is submitted by a user, it's assigned an ID and the status
-is set to `Scheduled`. Then the scheduler immediately starts to run the
-task by launching a new **Runner** goroutine.
+#### Workflow Operations
 
-#### Cancel a task
+##### Scheduling a Task
+When a user submits a task, it is assigned a unique ID and its status is set to `Scheduled`. The scheduler then immediately begins execution by launching a new **Runner** goroutine.
 
-If a user cancels a task, the scheduler closes the task’s `cancel`
-channel to signal to the associated **Runner** that it needs to cancel the task.
-Then the **Runner** updates the task status to `Canceled` and exits. If the task
-is already complete, canceling it has no effect.
+##### Canceling a Task
+When a user cancels a task, the scheduler closes the task's `cancel` channel, signaling the associated **Runner** to abort. The Runner then updates the task's status to `Cancelled` and terminates. Canceling a task that has already finished has no effect.
 
-#### Task timeout
+##### Task Timeout
+If a task's timeout duration expires before completion, the associated **Runner** updates the status to `TimedOut` and terminates.
 
-If the timeout duration of a task elapses before the task completes,
-the associated **Runner** updates the task status to `TimedOut` and exits.
+##### Stopping the Scheduler
+Upon stopping the scheduler, all active goroutines receive a stop signal. Runners send a `Stopped` status message and exit immediately. The Closer then closes the `result` channel, allowing the Updater to process any pending messages before terminating.
 
-#### Stop a scheduler
-
-When the scheduler is stopped, all active goroutines receive a stop signal.
-All **Runners** send a `Stopped` status message and exit immediately. Then
-**Closer** closes `result` channel and this allows **Updater** to exit
-after reading all messages from the channel.
+The `Stop()` method **blocks** until this entire process is complete, ensuring that the scheduler's internal state is fully finalized before it returns.
 
 ![](doc/diagram2.svg)
