@@ -76,43 +76,30 @@ func New() *Scheduler {
 	s.sysWg.Add(1)
 	go func() {
 		defer s.sysWg.Done()
-		var err error
-		for {
-			select {
-			case r, ok := <-s.result:
-				if !ok {
-					slog.Debug("scheduler stopped: 'Updater' goroutine completed reading updates and exited")
-					return
-				}
-				err = updateFunc(r)
-				if err != nil {
-					slog.Warn("failed to update task status in map: " + err.Error())
-				}
-			case <-s.stopped:
-				// Continue draining s.result in the loop above until it is closed.
-				// This case is kept to ensure we don't block if s.result is not yet closed.
+		for r := range s.result {
+			err := updateFunc(r)
+			if err != nil {
+				slog.Warn("failed to update task status in map: " + err.Error())
 			}
 		}
+		slog.Debug("scheduler stopped: 'Updater' goroutine completed reading updates and exited")
 	}()
 
 	return s
 }
 
 // Stop stops this Scheduler and all tasks that are not completed.
+// It blocks until all pending status updates are processed and system goroutines exit.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
 	if s.isStopped {
 		s.mu.Unlock()
+		s.sysWg.Wait()
 		return
 	}
 	s.isStopped = true
 	close(s.stopped)
 	s.mu.Unlock()
-}
-
-// Wait waits for all tasks to finish and the scheduler to fully stop.
-// This should be called after Stop().
-func (s *Scheduler) Wait() {
 	s.sysWg.Wait()
 }
 
@@ -245,12 +232,6 @@ func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel c
 	}
 
 	s.result <- finalStatus
-	if finalStatus.Status != TaskCompleted {
-		// If we return because of cancel/stop/timeout, the context is cancelled by defer cancelCtx().
-		// We wait for the Executor goroutine to finish to avoid leaks.
-		// If the user task is bad and hangs, this will block the runner (and thus s.wg.Wait() during Stop).
-		<-taskChan
-	}
 }
 
 // Status returns latest status of a task with the given ID.

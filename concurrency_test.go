@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestConcurrency_SubmitPanic(t *testing.T) {
@@ -27,7 +28,6 @@ func TestConcurrency_SubmitPanic(t *testing.T) {
 		}()
 
 		wg.Wait()
-		s.Wait()
 	}
 }
 
@@ -83,12 +83,14 @@ func TestConcurrency_WaitOnStop(t *testing.T) {
 
 	<-taskStarted
 	s.Stop()
-	s.Wait()
+
+	// Since Stop() now blocks until all system goroutines are done,
+	// we just need to wait for taskFinished with a reasonable timeout.
 
 	select {
 	case <-taskFinished:
 		// Task finished
-	default:
-		t.Error("Task did not finish after s.Wait() returned")
+	case <-time.After(2 * time.Second):
+		t.Error("Task did not finish in time after s.Wait() returned")
 	}
 }

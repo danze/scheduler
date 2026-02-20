@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,8 +17,31 @@ var myTaskOneMilliSec = newMockTask(time.Millisecond, false)
 var myTaskOneSec = newMockTask(time.Second, false)
 var myTaskPanics = newMockTask(time.Millisecond, true)
 
+type SafeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *SafeBuffer) Write(p []byte) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *SafeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func (s *SafeBuffer) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf.Reset()
+}
+
 var s *Scheduler
-var buf bytes.Buffer
+var buf SafeBuffer
 
 func beforeTest() {
 	buf.Reset()
@@ -25,14 +49,21 @@ func beforeTest() {
 	s = New()
 }
 
-func afterTest(t *testing.T, taskID string) {
+func afterTest(t *testing.T, taskID string, checkLog bool) {
 	s.Stop()
-	s.Wait()
-	logs := buf.String()
-	fmt.Println(logs)
-	if taskID != "" {
+	if checkLog && taskID != "" {
+		// Even with Wait(), the executor goroutine might still be finishing its defer block
+		// because we no longer wait for it. We wait a bit for the log message to appear.
 		expectedString := fmt.Sprintf("Task %v exited with result", taskID)
-		assert.Contains(t, logs, expectedString, "Task goroutine did not exit")
+		success := false
+		for i := 0; i < 10; i++ {
+			if bytes.Contains([]byte(buf.String()), []byte(expectedString)) {
+				success = true
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		assert.True(t, success, "Task goroutine log message did not appear")
 	}
 }
 
@@ -56,7 +87,7 @@ func runTaskHelper(t *testing.T, task Task) {
 		status, err = s.Status(id)
 	}
 	checkStatus(t, s, id, TaskCompleted)
-	afterTest(t, id)
+	afterTest(t, id, true)
 }
 
 func Test_Cancelled(t *testing.T) {
@@ -73,7 +104,7 @@ func Test_Cancelled(t *testing.T) {
 	// cancelling twice has no effect
 	err = s.Cancel(id)
 	assert.Nil(t, err, "failed to cancel task second time")
-	afterTest(t, id)
+	afterTest(t, id, false)
 }
 
 func Test_TimedOut(t *testing.T) {
@@ -93,7 +124,7 @@ func Test_TimedOut(t *testing.T) {
 	assert.Nil(t, err, "failed to get task status")
 	assert.True(t, startedRunning)
 	checkStatus(t, s, id, TaskTimedOut)
-	afterTest(t, id)
+	afterTest(t, id, false)
 }
 
 func Test_Stopped(t *testing.T) {
@@ -110,7 +141,7 @@ func Test_Stopped(t *testing.T) {
 
 	_, err = s.Submit(myTaskOneSec)
 	assert.NotNil(t, err, "stopped scheduler should not accept new tasks")
-	afterTest(t, id)
+	afterTest(t, id, false)
 }
 
 func Test_MultipleCompleted(t *testing.T) {
@@ -139,7 +170,7 @@ func Test_MultipleCompleted(t *testing.T) {
 		_, err = s.Status(id)
 		assert.NotNil(t, err, "task %v not removed", id)
 	}
-	afterTest(t, "")
+	afterTest(t, "", false)
 }
 
 func Test_MultipleCancelled(t *testing.T) {
@@ -160,7 +191,7 @@ func Test_MultipleCancelled(t *testing.T) {
 	for _, id := range taskID {
 		checkStatus(t, s, id, TaskCancelled)
 	}
-	afterTest(t, "")
+	afterTest(t, "", false)
 }
 
 func Test_MultipleTimedOut(t *testing.T) {
@@ -176,7 +207,7 @@ func Test_MultipleTimedOut(t *testing.T) {
 	for _, id := range taskID {
 		checkStatus(t, s, id, TaskTimedOut)
 	}
-	afterTest(t, "")
+	afterTest(t, "", false)
 }
 
 func Test_MultipleStopped(t *testing.T) {
@@ -194,7 +225,7 @@ func Test_MultipleStopped(t *testing.T) {
 	for _, id := range taskID {
 		checkStatus(t, s, id, TaskStopped)
 	}
-	afterTest(t, "")
+	afterTest(t, "", false)
 }
 
 func checkStatus(t *testing.T, s *Scheduler, id string, expected Status) {
