@@ -22,8 +22,10 @@ type Scheduler struct {
 		*TaskStatus
 		cancel chan struct{}
 	}
-	wg *sync.WaitGroup
-	mu *sync.Mutex
+	wg        *sync.WaitGroup
+	sysWg     *sync.WaitGroup // Waits for system goroutines (Closer/Updater)
+	mu        *sync.Mutex
+	isStopped bool
 }
 
 // New creates and initializes a new Scheduler.
@@ -35,8 +37,9 @@ func New() *Scheduler {
 			*TaskStatus
 			cancel chan struct{}
 		}),
-		wg: new(sync.WaitGroup),
-		mu: new(sync.Mutex),
+		wg:    new(sync.WaitGroup),
+		sysWg: new(sync.WaitGroup),
+		mu:    new(sync.Mutex),
 	}
 
 	updateFunc := func(r TaskStatus) error {
@@ -53,7 +56,9 @@ func New() *Scheduler {
 	}
 
 	// "Closer" goroutine
+	s.sysWg.Add(1)
 	go func() {
+		defer s.sysWg.Done()
 		// After user stops the scheduler (`stopped` channel is closed), running tasks
 		// will immediately exit with `TaskStopped` status and any new task submission
 		// will fail.
@@ -68,24 +73,24 @@ func New() *Scheduler {
 
 	// "Updater" goroutine receives status updates from tasks and
 	// updates the schedule `tasks` map.
+	s.sysWg.Add(1)
 	go func() {
+		defer s.sysWg.Done()
 		var err error
 		for {
 			select {
-			case r := <-s.result:
+			case r, ok := <-s.result:
+				if !ok {
+					slog.Debug("scheduler stopped: 'Updater' goroutine completed reading updates and exited")
+					return
+				}
 				err = updateFunc(r)
 				if err != nil {
 					slog.Warn("failed to update task status in map: " + err.Error())
 				}
 			case <-s.stopped:
-				for r := range s.result {
-					err = updateFunc(r)
-					if err != nil {
-						slog.Warn("failed to update task status in map: " + err.Error())
-					}
-				}
-				slog.Debug("scheduler stopped: 'Updater' goroutine completed reading updates and exited")
-				return
+				// Continue draining s.result in the loop above until it is closed.
+				// This case is kept to ensure we don't block if s.result is not yet closed.
 			}
 		}
 	}()
@@ -95,23 +100,27 @@ func New() *Scheduler {
 
 // Stop stops this Scheduler and all tasks that are not completed.
 func (s *Scheduler) Stop() {
-	select {
-	case <-s.stopped:
-		// Already stopped
+	s.mu.Lock()
+	if s.isStopped {
+		s.mu.Unlock()
 		return
-	default:
-		close(s.stopped)
 	}
+	s.isStopped = true
+	close(s.stopped)
+	s.mu.Unlock()
+}
+
+// Wait waits for all tasks to finish and the scheduler to fully stop.
+// This should be called after Stop().
+func (s *Scheduler) Wait() {
+	s.sysWg.Wait()
 }
 
 // IsStopped checks if this Scheduler has been stopped.
 func (s *Scheduler) IsStopped() bool {
-	select {
-	case <-s.stopped:
-		return true
-	default:
-		return false
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isStopped
 }
 
 // Submit schedules the given Task to run by this Scheduler. If the Task is
@@ -124,12 +133,13 @@ func (s *Scheduler) Submit(task Task) (string, error) {
 // the task timeout to the given value. If the Task is
 // scheduled successfully, it returns task ID otherwise an error.
 func (s *Scheduler) SubmitWithTimeout(task Task, timeout time.Duration) (string, error) {
-	if s.IsStopped() {
+	s.mu.Lock()
+	if s.isStopped {
+		s.mu.Unlock()
 		return "", fmt.Errorf("scheduler has been stopped")
 	}
 	id := uuid.NewString()
 	cancel := make(chan struct{})
-	s.mu.Lock()
 	s.tasks[id] = struct {
 		*TaskStatus
 		cancel chan struct{}
@@ -142,8 +152,9 @@ func (s *Scheduler) SubmitWithTimeout(task Task, timeout time.Duration) (string,
 		},
 		cancel: cancel,
 	}
-	s.mu.Unlock()
 	s.wg.Add(1)
+	s.mu.Unlock()
+
 	// creates Runner goroutine for this task
 	go s.runner(id, task, timeout, cancel)
 	return id, nil
@@ -193,48 +204,52 @@ func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel c
 
 	timedOut := time.After(timeout.Abs())
 
+	var finalStatus TaskStatus
 	// Prioritize task completion over cancellation/timeout/stop signals
 	// to avoid marking a completed task with the wrong status
 	select {
 	case r := <-taskChan:
 		// Task completed - this takes priority
-		s.result <- TaskStatus{
+		finalStatus = TaskStatus{
 			ID:     id,
 			Status: TaskCompleted,
 			Output: r.output,
 			Err:    r.err,
 		}
-		return
 	default:
 		// Task not yet completed, check for cancel/stop/timeout
 		select {
 		case <-cancel:
-			s.result <- TaskStatus{
+			finalStatus = TaskStatus{
 				ID:     id,
 				Status: TaskCancelled,
 			}
-			return
 		case <-s.stopped:
-			s.result <- TaskStatus{
+			finalStatus = TaskStatus{
 				ID:     id,
 				Status: TaskStopped,
 			}
-			return
 		case <-timedOut:
-			s.result <- TaskStatus{
+			finalStatus = TaskStatus{
 				ID:     id,
 				Status: TaskTimedOut,
 			}
-			return
 		case r := <-taskChan:
-			s.result <- TaskStatus{
+			finalStatus = TaskStatus{
 				ID:     id,
 				Status: TaskCompleted,
 				Output: r.output,
 				Err:    r.err,
 			}
-			return
 		}
+	}
+
+	s.result <- finalStatus
+	if finalStatus.Status != TaskCompleted {
+		// If we return because of cancel/stop/timeout, the context is cancelled by defer cancelCtx().
+		// We wait for the Executor goroutine to finish to avoid leaks.
+		// If the user task is bad and hangs, this will block the runner (and thus s.wg.Wait() during Stop).
+		<-taskChan
 	}
 }
 
@@ -291,56 +306,64 @@ func deepCopyAny(v any) any {
 	if v == nil {
 		return nil
 	}
-	return deepCopyValue(reflect.ValueOf(v)).Interface()
+	visited := make(map[uintptr]reflect.Value)
+	return deepCopyValue(reflect.ValueOf(v), visited).Interface()
 }
 
-func deepCopyValue(v reflect.Value) reflect.Value {
-	switch v.Kind() {
-	case reflect.Ptr:
+func deepCopyValue(v reflect.Value, visited map[uintptr]reflect.Value) reflect.Value {
+	if !v.IsValid() {
+		return v
+	}
+
+	// Handle pointer-based types for circular references
+	kind := v.Kind()
+	if kind == reflect.Ptr || kind == reflect.Map || kind == reflect.Slice || kind == reflect.Interface {
 		if v.IsNil() {
 			return reflect.Zero(v.Type())
 		}
+		if kind != reflect.Interface {
+			ptr := v.Pointer()
+			if copyV, ok := visited[ptr]; ok {
+				return copyV
+			}
+		}
+	}
+
+	switch kind {
+	case reflect.Ptr:
 		dst := reflect.New(v.Type().Elem())
-		dst.Elem().Set(deepCopyValue(v.Elem()))
+		visited[v.Pointer()] = dst
+		dst.Elem().Set(deepCopyValue(v.Elem(), visited))
 		return dst
 	case reflect.Map:
-		if v.IsNil() {
-			return reflect.Zero(v.Type())
-		}
 		dst := reflect.MakeMap(v.Type())
+		visited[v.Pointer()] = dst
 		for _, k := range v.MapKeys() {
-			dst.SetMapIndex(deepCopyValue(k), deepCopyValue(v.MapIndex(k)))
+			dst.SetMapIndex(deepCopyValue(k, visited), deepCopyValue(v.MapIndex(k), visited))
 		}
 		return dst
 	case reflect.Slice:
-		if v.IsNil() {
-			return reflect.Zero(v.Type())
-		}
-		dst := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
-		for i := range v.Len() {
-			dst.Index(i).Set(deepCopyValue(v.Index(i)))
+		dst := reflect.MakeSlice(v.Type(), v.Len(), v.Cap())
+		visited[v.Pointer()] = dst
+		for i := 0; i < v.Len(); i++ {
+			dst.Index(i).Set(deepCopyValue(v.Index(i), visited))
 		}
 		return dst
 	case reflect.Struct:
 		dst := reflect.New(v.Type()).Elem()
-		for i := range v.NumField() {
+		for i := 0; i < v.NumField(); i++ {
 			if dst.Field(i).CanSet() {
-				dst.Field(i).Set(deepCopyValue(v.Field(i)))
+				dst.Field(i).Set(deepCopyValue(v.Field(i), visited))
 			}
 		}
 		return dst
 	case reflect.Interface:
-		if v.IsNil() {
-			return reflect.Zero(v.Type())
-		}
 		dst := reflect.New(v.Type()).Elem()
-		dst.Set(deepCopyValue(v.Elem()))
+		dst.Set(deepCopyValue(v.Elem(), visited))
 		return dst
 	default:
 		// Primitive types (bool, int, float, string, etc.) are immutable values.
 		// Chan and func are not deep-copyable; return as-is.
-		dst := reflect.New(v.Type()).Elem()
-		dst.Set(v)
-		return dst
+		return v
 	}
 }

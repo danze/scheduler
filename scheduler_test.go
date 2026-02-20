@@ -26,6 +26,8 @@ func beforeTest() {
 }
 
 func afterTest(t *testing.T, taskID string) {
+	s.Stop()
+	s.Wait()
 	logs := buf.String()
 	fmt.Println(logs)
 	if taskID != "" {
