@@ -11,10 +11,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// Scheduler runs Task submitted by a user. It allows the user to get status
-// or cancel a previously submitted Task. It also allows the user to stop this
-// Scheduler which has the effect of stopping also tasks that are not
-// complete.
+// Scheduler manages the execution of submitted tasks. It provides functionality
+// to track task status, cancel running tasks, and shut down the entire system.
+// A Scheduler must be created using the New() function.
 type Scheduler struct {
 	stopped chan struct{}
 	result  chan TaskStatus
@@ -22,13 +21,14 @@ type Scheduler struct {
 		*TaskStatus
 		cancel chan struct{}
 	}
-	wg        *sync.WaitGroup
+	wg        *sync.WaitGroup // Waits for Runner goroutines
 	sysWg     *sync.WaitGroup // Waits for system goroutines (Closer/Updater)
 	mu        *sync.Mutex
 	isStopped bool
 }
 
-// New creates and initializes a new Scheduler.
+// New creates and initializes a new Scheduler. The scheduler is immediately
+// ready to accept tasks via Submit.
 func New() *Scheduler {
 	s := &Scheduler{
 		stopped: make(chan struct{}),
@@ -88,8 +88,16 @@ func New() *Scheduler {
 	return s
 }
 
-// Stop stops this Scheduler and all tasks that are not completed.
-// It blocks until all pending status updates are processed and system goroutines exit.
+// Stop initiates a shutdown of the Scheduler. It signals all running tasks
+// to stop via their context and blocks until all pending status updates are
+// processed and internal system goroutines have exited.
+//
+// Note: Stop does NOT wait for the user-submitted task functions (the
+// executor goroutines) to return, as they are outside the scheduler's
+// control. It only ensures that the scheduler's internal state reflects the
+// final status of those tasks (e.g., TaskStopped).
+//
+// Once stopped, the scheduler will no longer accept new tasks.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
 	if s.isStopped {
@@ -103,22 +111,22 @@ func (s *Scheduler) Stop() {
 	s.sysWg.Wait()
 }
 
-// IsStopped checks if this Scheduler has been stopped.
+// IsStopped returns true if the Scheduler has been stopped.
 func (s *Scheduler) IsStopped() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.isStopped
 }
 
-// Submit schedules the given Task to run by this Scheduler. If the Task is
-// scheduled successfully, it returns task ID otherwise an error.
+// Submit schedules a task for execution. It returns a unique task ID if the
+// task was accepted, or an error if the scheduler is stopped.
 func (s *Scheduler) Submit(task Task) (string, error) {
 	return s.SubmitWithTimeout(task, time.Duration(1<<63-1))
 }
 
-// SubmitWithTimeout schedules the given Task to run by this Scheduler. It sets
-// the task timeout to the given value. If the Task is
-// scheduled successfully, it returns task ID otherwise an error.
+// SubmitWithTimeout schedules a task for execution with a specified timeout.
+// It returns a unique task ID if the task was accepted, or an error if the
+// scheduler is stopped. The task will be aborted if it exceeds the timeout.
 func (s *Scheduler) SubmitWithTimeout(task Task, timeout time.Duration) (string, error) {
 	s.mu.Lock()
 	if s.isStopped {
@@ -234,7 +242,9 @@ func (s *Scheduler) runner(id string, task Task, timeout time.Duration, cancel c
 	s.result <- finalStatus
 }
 
-// Status returns latest status of a task with the given ID.
+// Status returns the latest state and results of the task with the given ID.
+// It returns an error if the task ID is not found. The returned TaskStatus
+// contains a deep copy of the output to ensure thread safety.
 func (s *Scheduler) Status(id string) (*TaskStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -247,8 +257,8 @@ func (s *Scheduler) Status(id string) (*TaskStatus, error) {
 	return &ts, nil
 }
 
-// Cancel cancels a task with the given ID. If the task has already completed,
-// Cancel has no effect.
+// Cancel signals a running task to stop. It has no effect if the task has
+// already finished. It returns an error if the task ID is not found.
 func (s *Scheduler) Cancel(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -266,9 +276,9 @@ func (s *Scheduler) Cancel(id string) error {
 	return nil
 }
 
-// Remove removes a completed task from the scheduler's task map.
-// This should be called to prevent memory leaks when tasks are no longer needed.
-// Returns an error if the task is not found or is still running.
+// Remove deletes a finished task's records from the Scheduler. This should be
+// called once a task's result is no longer needed to prevent memory leaks.
+// It returns an error if the task is not found or is still running.
 func (s *Scheduler) Remove(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

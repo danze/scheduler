@@ -5,19 +5,26 @@ import (
 	"fmt"
 )
 
-// Task defines a user submitted task that is executed by Scheduler.
-// The task receives a context.Context which should be checked for cancellation.
-// Users should monitor ctx.Done() and return early if the context is canceled.
+// Task defines a user-submitted function that is executed by the Scheduler.
+// The task receives a context.Context which it should monitor via ctx.Done()
+// to handle cancellation or timeouts gracefully.
 type Task func(context.Context) (any, error)
 
+// Status represents the current state of a Task in the Scheduler.
 type Status int
 
 const (
+	// TaskScheduled indicates the task has been submitted but hasn't started yet.
 	TaskScheduled Status = 1 + iota
+	// TaskRunning indicates the task is currently being executed.
 	TaskRunning
+	// TaskStopped indicates the task was aborted because the Scheduler was stopped.
 	TaskStopped
+	// TaskCancelled indicates the task was explicitly cancelled by the user.
 	TaskCancelled
+	// TaskCompleted indicates the task finished execution (either successfully or with an error).
 	TaskCompleted
+	// TaskTimedOut indicates the task was aborted because it exceeded its timeout.
 	TaskTimedOut
 )
 
@@ -40,27 +47,31 @@ func (t Status) String() string {
 	}
 }
 
-// TaskStatus is status of the Task identified by ID. If this Task has
-// finished running as defined by the Completed method, then either Output or
-// Err is non-nil.
+// TaskStatus contains the latest state and results of a task identified by ID.
+// If the task has finished (as indicated by Completed()), then either Output or
+// Err will contain the final result.
 type TaskStatus struct {
-	ID     string // Task ID
-	Status Status // Latest status of this Task
-	Output any    // Result if this Task completed successfully
-	Err    error  // Error if this Task failed
+	ID     string // Unique identifier for the task.
+	Status Status // Current state of the task.
+	Output any    // The result of the task if it completed successfully.
+	Err    error  // The error returned by the task or why it failed.
 }
 
-// Completed returns true if this task is not running and not scheduled.
+// Completed returns true if the task has finished execution, been cancelled,
+// timed out, or the scheduler has stopped.
 func (t *TaskStatus) Completed() bool {
 	s := t.Status
 	return s != TaskRunning && s != TaskScheduled
 }
 
+// String returns a brief string representation of the TaskStatus.
 func (t *TaskStatus) String() string {
 	return fmt.Sprintf("TaskStatus id: %s, status: %v, output: %v, error: %v",
 		t.ID, t.Status, t.Output, t.Err)
 }
 
+// StringDetailed returns a more descriptive string representation of the
+// TaskStatus, including results if the task is completed.
 func (t *TaskStatus) StringDetailed() string {
 	statusString := fmt.Sprintf("ID: %s, Status: %v", t.ID, t.Status)
 	if t.Completed() {
